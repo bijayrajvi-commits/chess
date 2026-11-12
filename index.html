@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Grandmaster</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+--bg:#f1ebe0;--fg:#2a211a;--muted:#7a6c5c;--light:#e3c99f;--dark:#9a6a44;--hl:rgba(240,190,80,.5);--dot:rgba(30,20,10,.35);--chk:rgba(214,60,45,.8);--panel:#e4dccd;color-scheme:light}
+html{scroll-padding-top:env(safe-area-inset-top,0px);height:100%}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14110f;--fg:#efe6d8;--muted:#9a8f80;--panel:#231d19;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#14110f;--fg:#efe6d8;--muted:#9a8f80;--panel:#231d19;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;min-height:100%;background:var(--bg);color:var(--fg);font:16px/1.4 Georgia,"Times New Roman",serif;display:flex;flex-direction:column;align-items:center;gap:12px;padding:16px 12px}
+h1{margin:0;font-size:1.4rem;letter-spacing:.02em}
+#status{min-height:1.4em;color:var(--muted)}
+.wrap{display:flex;gap:8px;width:min(94vw,560px)}
+#bar{width:10px;border-radius:5px;overflow:hidden;display:flex;flex-direction:column;background:#efe6d8;border:1px solid var(--muted)}
+#bar i{display:block;background:#2a2521;height:50%;transition:height .4s}
+#board{flex:1;aspect-ratio:1;display:grid;grid-template:repeat(8,1fr)/repeat(8,1fr);border-radius:4px;overflow:hidden;touch-action:manipulation}
+.sq{position:relative;display:flex;align-items:center;justify-content:center;font-size:min(9vw,50px);line-height:1;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}
+.sq.l{background:var(--light)}.sq.d{background:var(--dark)}
+.sq.last::before{content:"";position:absolute;inset:0;background:var(--hl)}
+.sq.chk::before{content:"";position:absolute;inset:8%;border-radius:50%;background:var(--chk);filter:blur(4px)}
+.sq.sel{box-shadow:inset 0 0 0 3px var(--fg)}
+.sq b{position:absolute;width:30%;height:30%;border-radius:50%;background:var(--dot)}
+.sq b.cap{width:90%;height:90%;background:none;border:3px solid var(--dot)}
+.pc{position:relative;font-family:"Segoe UI Symbol","Noto Sans Symbols 2",serif}
+.pc.w{color:#fff8ea;text-shadow:0 0 2px #000,0 1px 1px #000}.pc.b{color:#1b1612}
+#moves{width:min(94vw,560px);overflow-x:auto;white-space:nowrap;padding:8px 10px;background:var(--panel);border-radius:6px;min-height:2.4em}
+#moves span{margin-right:10px}
+.ctl{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+button,select{font:inherit;padding:8px 14px;border-radius:6px;border:1px solid var(--muted);background:var(--panel);color:var(--fg)}
+button:focus-visible,select:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
+small{color:var(--muted);max-width:560px;text-align:center}
+</style>
+</head>
+<body>
+<h1>Grandmaster</h1>
+<div id="status">Your move</div>
+<div class="wrap"><div id="bar"><i id="barfill"></i></div><div id="board" role="grid" aria-label="Chessboard"></div></div>
+<div id="moves" aria-label="Move history"></div>
+<div class="ctl">
+  <select id="level" aria-label="Bot level"><option value="1">Beginner</option><option value="2" selected>Club</option><option value="3">Strong</option></select>
+  <select id="side" aria-label="Play as"><option value="w">Play white</option><option value="b">Play black</option></select>
+  <button id="new">New game</button>
+  <button id="snd" aria-pressed="true">Sound on</button>
+</div>
+<small>The bar shows material balance. The built-in bot is a small search engine; swap in Stockfish through a stockfish.js Web Worker for full strength.</small>
+
+<script>
+const G = new Chess();
+const GL = {p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚'};
+const FILES = 'abcdefgh';
+let me = 'w', sel = null, last = null, busy = false, soundOn = true, ended = false;
+const $ = id => document.getElementById(id);
+
+/* ---------- Audio + haptics (procedural, no files) ---------- */
+let ac;
+function ctx(){ return ac || (ac = new (window.AudioContext || window.webkitAudioContext)()); }
+function tone(f, t0, dur, type='sine', vol=.2){
+  const a = ctx(), o = a.createOscillator(), g = a.createGain();
+  o.type = type; o.frequency.value = f;
+  g.gain.setValueAtTime(vol, a.currentTime + t0);
+  g.gain.exponentialRampToValueAtTime(.001, a.currentTime + t0 + dur);
+  o.connect(g).connect(a.destination); o.start(a.currentTime + t0); o.stop(a.currentTime + t0 + dur + .02);
+}
+function thud(t0, vol, base){
+  const a = ctx(), f = base * (0.92 + Math.random()*.16);
+  tone(f, t0, .09, 'triangle', vol); tone(f*2.3, t0, .04, 'square', vol*.25);
+}
+const CUES = {
+  move:   () => thud(0, .35, 150),
+  capture:() => { thud(0, .5, 120); thud(.05, .3, 200); },
+  castle: () => { thud(0, .35, 150); thud(.12, .35, 170); },
+  check:  () => { [0,.22].forEach(t => { tone(880, t, .5, 'sine', .22); tone(1320, t, .4, 'sine', .1); }); },
+  illegal:() => tone(90, 0, .12, 'sine', .25),
+  win:    () => [523,659,784,1047].forEach((f,i) => tone(f, i*.13, .5, 'triangle', .22)),
+  lose:   () => [392,330,262].forEach((f,i) => tone(f, i*.2, .5, 'sine', .22)),
+  draw:   () => { tone(440, 0, .35); tone(392, .25, .4); }
+};
+const VIB = {move:10, capture:25, castle:[12,60,12], check:[40,50,40], illegal:[60], win:[30,40,30,40,80], lose:[120], draw:[20]};
+function cue(c){
+  try{ navigator.vibrate && navigator.vibrate(VIB[c]); }catch(e){}
+  if(soundOn){ try{ ctx().resume(); CUES[c](); }catch(e){} }
+}
+
+/* ---------- Bot: negamax alpha-beta ---------- */
+const V = {p:100,n:320,b:330,r:500,q:900,k:0};
+function evalW(g){
+  let s = 0; const b = g.board();
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const p = b[r][c]; if(!p) continue;
+    let v = V[p.type];
+    if(p.type==='p') v += (p.color==='w' ? 7-r : r) * 6;
+    if(p.type!=='k' && p.type!=='r') v += (7 - Math.abs(2*c-7) - Math.abs(2*r-7)) * 1.5;
+    s += p.color==='w' ? v : -v;
+  }
+  return s;
+}
+function search(g, d, a, b, col){
+  if(g.in_checkmate()) return -99999 - d;
+  if(d===0 || g.game_over()) return g.in_draw() ? 0 : col*evalW(g);
+  const ms = g.moves({verbose:true}).sort((x,y) => (y.captured?1:0) - (x.captured?1:0));
+  let best = -Infinity;
+  for(const m of ms){
+    g.move(m); const v = -search(g, d-1, -b, -a, -col); g.undo();
+    if(v>best) best = v; if(best>a) a = best; if(a>=b) break;
+  }
+  return best;
+}
+function pick(depth, noise){
+  const col = G.turn()==='w' ? 1 : -1; let best = null, bv = -Infinity;
+  for(const m of G.moves({verbose:true})){
+    G.move(m); const v = -search(G, depth-1, -Infinity, Infinity, -col) + Math.random()*noise; G.undo();
+    if(v>bv){ bv = v; best = m; }
+  }
+  return best;
+}
+
+/* ---------- Game flow ---------- */
+function commit(from, to){
+  const m = G.move({from, to, promotion:'q'});
+  if(!m){ cue('illegal'); return false; }
+  last = {from:m.from, to:m.to}; sel = null;
+  if(G.in_checkmate()){ ended = true; cue(G.turn()===me ? 'lose' : 'win'); }
+  else if(G.in_draw()){ ended = true; cue('draw'); }
+  else if(G.in_check()) cue('check');
+  else if(m.flags.includes('k') || m.flags.includes('q')) cue('castle');
+  else if(m.captured) cue('capture');
+  else cue('move');
+  render();
+  return true;
+}
+function botTurn(){
+  if(ended || G.turn()===me) return;
+  busy = true; render();
+  const lv = +$('level').value;
+  setTimeout(() => {
+    const m = pick([1,2,3][lv-1], [90,25,0][lv-1]);
+    busy = false;
+    if(m) commit(m.from, m.to);
+    botTurn();
+  }, 350);
+}
+function onSquare(name){
+  if(ended || busy || G.turn()!==me) return;
+  const targets = sel ? G.moves({square:sel, verbose:true}).map(m => m.to) : [];
+  if(sel && targets.includes(name)){ if(commit(sel, name)) botTurn(); return; }
+  const p = G.get(name);
+  sel = p && p.color===me ? name : null; render();
+}
+
+/* ---------- Render ---------- */
+function render(){
+  const el = $('board'); el.innerHTML = '';
+  const targets = sel ? G.moves({square:sel, verbose:true}).map(m => m.to) : [];
+  let kingSq = null;
+  if(G.in_check()){
+    const b = G.board();
+    for(let r=0;r<8;r++) for(let c=0;c<8;c++){ const p=b[r][c]; if(p && p.type==='k' && p.color===G.turn()) kingSq = FILES[c]+(8-r); }
+  }
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){
+    const f = me==='w' ? c : 7-c, rk = me==='w' ? 8-r : r+1, name = FILES[f]+rk;
+    const d = document.createElement('div');
+    d.className = 'sq ' + ((f+rk)%2===1 ? 'l' : 'd') + (last && (last.from===name||last.to===name) ? ' last' : '') + (kingSq===name ? ' chk' : '') + (sel===name ? ' sel' : '');
+    d.setAttribute('role','gridcell'); d.setAttribute('aria-label', name);
+    const p = G.get(name);
+    if(p){ const s = document.createElement('span'); s.className = 'pc ' + p.color; s.textContent = GL[p.type] + '\uFE0E'; d.appendChild(s); }
+    if(targets.includes(name)){ const dot = document.createElement('b'); if(p) dot.className = 'cap'; d.appendChild(dot); }
+    d.addEventListener('click', () => onSquare(name));
+    el.appendChild(d);
+  }
+  const h = G.history(); $('moves').innerHTML = h.map((m,i) => `<span>${i%2===0 ? (i/2+1)+'. ' : ''}${m}</span>`).join('') || '<span style="color:var(--muted)">Moves appear here</span>';
+  $('moves').scrollLeft = 99999;
+  const mat = Math.max(-1000, Math.min(1000, evalW(G)));
+  $('barfill').style.height = (100 - 100/(1+Math.exp(-mat/400))) + '%';
+  $('status').textContent = G.in_checkmate() ? (G.turn()===me ? 'Checkmate. You lost.' : 'Checkmate. You won.') : G.in_draw() ? 'Draw' : busy ? 'Bot is thinking…' : G.turn()===me ? (G.in_check() ? 'Check. Your move' : 'Your move') : '';
+}
+function newGame(){ G.reset(); me = $('side').value; sel = null; last = null; ended = false; busy = false; render(); botTurn(); }
+$('new').onclick = newGame;
+$('side').onchange = newGame;
+$('snd').onclick = e => { soundOn = !soundOn; e.target.textContent = soundOn ? 'Sound on' : 'Sound off'; e.target.setAttribute('aria-pressed', soundOn); };
+render();
+</script>
+</body>
+</html>
